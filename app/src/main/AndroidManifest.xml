@@ -7,7 +7,9 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <application
         android:theme="@style/AppTheme"
-        android:label="SAYMA BUILDERS"
+        android:label="Sayma Builders"
+        android:icon="@drawable/sayma_logo"
+        android:roundIcon="@drawable/sayma_logo"
         android:usesCleartextTraffic="false"
         android:hardwareAccelerated="true">
         <meta-data
