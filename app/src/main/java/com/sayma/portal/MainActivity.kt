@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.webkit.GeolocationPermissions
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
@@ -27,14 +28,14 @@ import com.facebook.CallbackManager
 import com.facebook.FacebookCallback
 import com.facebook.FacebookException
 import com.facebook.FacebookSdk
-import com.facebook.LoginStatusCallback
 import com.facebook.login.LoginManager
 import com.facebook.login.LoginResult
 import org.json.JSONObject
 
 class MainActivity : Activity() {
     private lateinit var webView: WebView
-    private lateinit var callbackManager: CallbackManager
+    private var callbackManager: CallbackManager? = null
+    private var nativeFacebookLoginEnabled = false
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private val portalUrl = "https://saymabuilders.com/portal/"
     private val permissionRequestCode = 7001
@@ -49,20 +50,7 @@ class MainActivity : Activity() {
         WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightNavigationBars = true
 
         requestRuntimePermissions()
-        FacebookSdk.sdkInitialize(applicationContext)
-        callbackManager = CallbackManager.Factory.create()
-        LoginManager.getInstance().registerCallback(callbackManager,
-            object : FacebookCallback<LoginResult> {
-                override fun onSuccess(result: LoginResult) {
-                    deliverFacebookToken(result.accessToken.token)
-                }
-                override fun onCancel() {
-                    deliverFacebookCancelled()
-                }
-                override fun onError(error: FacebookException) {
-                    deliverFacebookError(error.message ?: "Facebook sign-in failed.")
-                }
-            })
+        initializeFacebookLogin()
 
         webView = WebView(this)
         webView.settings.apply {
@@ -83,7 +71,9 @@ class MainActivity : Activity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                installNativeFacebookHook(view)
+                // Only replace the website's FB.login() flow when native login is configured.
+                // Otherwise the website keeps its normal browser-based Facebook login.
+                if (nativeFacebookLoginEnabled) installNativeFacebookHook(view)
             }
         }
         webView.webChromeClient = object : WebChromeClient() {
@@ -142,6 +132,48 @@ class MainActivity : Activity() {
         webView.loadUrl(portalUrl)
     }
 
+    private fun initializeFacebookLogin() {
+        val clientToken = BuildConfig.FACEBOOK_CLIENT_TOKEN.trim()
+        val appId = getString(R.string.facebook_app_id).trim()
+
+        // A Facebook App ID alone is not enough. Do not initialize the SDK unless
+        // the matching Client Token is supplied through the build environment.
+        if (appId.isEmpty() || clientToken.isEmpty()) {
+            nativeFacebookLoginEnabled = false
+            Log.i("SaymaPortal", "Native Facebook login is disabled: Facebook credentials are not fully configured.")
+            return
+        }
+
+        try {
+            FacebookSdk.setClientToken(clientToken)
+            FacebookSdk.sdkInitialize(applicationContext)
+
+            val manager = CallbackManager.Factory.create()
+            callbackManager = manager
+            LoginManager.getInstance().registerCallback(
+                manager,
+                object : FacebookCallback<LoginResult> {
+                    override fun onSuccess(result: LoginResult) {
+                        deliverFacebookToken(result.accessToken.token)
+                    }
+
+                    override fun onCancel() {
+                        deliverFacebookCancelled()
+                    }
+
+                    override fun onError(error: FacebookException) {
+                        deliverFacebookError(error.message ?: "Facebook sign-in failed.")
+                    }
+                }
+            )
+            nativeFacebookLoginEnabled = true
+        } catch (error: Exception) {
+            nativeFacebookLoginEnabled = false
+            callbackManager = null
+            Log.e("SaymaPortal", "Native Facebook login could not be initialized; the portal will still open.", error)
+        }
+    }
+
     private fun installNativeFacebookHook(view: WebView) {
         view.evaluateJavascript(
             """
@@ -187,7 +219,7 @@ class MainActivity : Activity() {
         val quoted = JSONObject.quote(message)
         runOnUiThread {
             webView.evaluateJavascript(
-                "if(window.__saymaFacebookCallback){window.__saymaFacebookCallback({});}",
+                "if(window.__saymaFacebookCallback){window.__saymaFacebookCallback({error:{message:$quoted}});}",
                 null
             )
         }
@@ -197,6 +229,10 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun login() {
             runOnUiThread {
+                if (!nativeFacebookLoginEnabled) {
+                    deliverFacebookError("Native Facebook login is not configured.")
+                    return@runOnUiThread
+                }
                 LoginManager.getInstance().logInWithReadPermissions(
                     this@MainActivity,
                     listOf("public_profile", "email")
@@ -221,7 +257,7 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (callbackManager.onActivityResult(requestCode, resultCode, data)) return
+        if (callbackManager?.onActivityResult(requestCode, resultCode, data) == true) return
         if (requestCode == fileRequestCode) {
             val result = if (resultCode == RESULT_OK && data?.data != null) {
                 arrayOf(data.data!!)

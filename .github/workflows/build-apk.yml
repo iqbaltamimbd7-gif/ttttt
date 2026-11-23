@@ -26,6 +26,8 @@ jobs:
         with:
           gradle-version: '8.10'
       - name: Build debug APK
+        env:
+          FACEBOOK_CLIENT_TOKEN: ${{ secrets.FACEBOOK_CLIENT_TOKEN }}
         run: gradle --no-daemon assembleDebug
       - name: Upload APK
         uses: actions/upload-artifact@v4
