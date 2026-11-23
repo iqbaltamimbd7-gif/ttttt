@@ -7,9 +7,8 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
-import android.view.View
-import android.view.Window
 import android.webkit.GeolocationPermissions
+import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -23,9 +22,18 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import com.facebook.AccessToken
+import com.facebook.CallbackManager
+import com.facebook.FacebookCallback
+import com.facebook.FacebookException
+import com.facebook.LoginStatusCallback
+import com.facebook.login.LoginManager
+import com.facebook.login.LoginResult
+import org.json.JSONObject
 
 class MainActivity : Activity() {
     private lateinit var webView: WebView
+    private lateinit var callbackManager: CallbackManager
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private val portalUrl = "https://saymabuilders.com/portal/"
     private val permissionRequestCode = 7001
@@ -34,13 +42,25 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Keep portal content clear of the camera notch and the three-button system navigation bar.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = Color.rgb(16, 24, 39)
         window.navigationBarColor = Color.WHITE
         WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightNavigationBars = true
 
         requestRuntimePermissions()
+        callbackManager = CallbackManager.Factory.create()
+        LoginManager.getInstance().registerCallback(callbackManager,
+            object : FacebookCallback<LoginResult> {
+                override fun onSuccess(result: LoginResult) {
+                    deliverFacebookToken(result.accessToken.token)
+                }
+                override fun onCancel() {
+                    deliverFacebookCancelled()
+                }
+                override fun onError(error: FacebookException) {
+                    deliverFacebookError(error.message ?: "Facebook sign-in failed.")
+                }
+            })
 
         webView = WebView(this)
         webView.settings.apply {
@@ -51,11 +71,18 @@ class MainActivity : Activity() {
             allowContentAccess = true
             mediaPlaybackRequiresUserGesture = false
             javaScriptCanOpenWindowsAutomatically = true
+            setSupportMultipleWindows(false)
             setGeolocationEnabled(true)
             cacheMode = WebSettings.LOAD_DEFAULT
         }
+        webView.addJavascriptInterface(FacebookBridge(), "AndroidFacebook")
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
+
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                installNativeFacebookHook(view)
+            }
         }
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
@@ -113,6 +140,69 @@ class MainActivity : Activity() {
         webView.loadUrl(portalUrl)
     }
 
+    private fun installNativeFacebookHook(view: WebView) {
+        view.evaluateJavascript(
+            """
+            (function(){
+              function hook(){
+                if(window.FB && !window.FB.__saymaNativeHooked){
+                  window.FB.__saymaNativeHooked=true;
+                  window.FB.login=function(callback){
+                    window.__saymaFacebookCallback=callback;
+                    if(window.AndroidFacebook){AndroidFacebook.login();}
+                  };
+                }
+              }
+              hook();
+              if(!window.__saymaFacebookHookTimer){
+                window.__saymaFacebookHookTimer=setInterval(hook,500);
+              }
+            })();
+            """.trimIndent(), null
+        )
+    }
+
+    private fun deliverFacebookToken(token: String) {
+        val quoted = JSONObject.quote(token)
+        runOnUiThread {
+            webView.evaluateJavascript(
+                "if(window.__saymaFacebookCallback){window.__saymaFacebookCallback({authResponse:{accessToken:$quoted}});}",
+                null
+            )
+        }
+    }
+
+    private fun deliverFacebookCancelled() {
+        runOnUiThread {
+            webView.evaluateJavascript(
+                "if(window.__saymaFacebookCallback){window.__saymaFacebookCallback({});}",
+                null
+            )
+        }
+    }
+
+    private fun deliverFacebookError(message: String) {
+        val quoted = JSONObject.quote(message)
+        runOnUiThread {
+            webView.evaluateJavascript(
+                "if(window.__saymaFacebookCallback){window.__saymaFacebookCallback({});}",
+                null
+            )
+        }
+    }
+
+    inner class FacebookBridge {
+        @JavascriptInterface
+        fun login() {
+            runOnUiThread {
+                LoginManager.getInstance().logInWithReadPermissions(
+                    this@MainActivity,
+                    listOf("public_profile", "email")
+                )
+            }
+        }
+    }
+
     private fun requestRuntimePermissions() {
         val needed = arrayOf(
             Manifest.permission.CAMERA,
@@ -129,6 +219,7 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (callbackManager.onActivityResult(requestCode, resultCode, data)) return
         if (requestCode == fileRequestCode) {
             val result = if (resultCode == RESULT_OK && data?.data != null) {
                 arrayOf(data.data!!)
